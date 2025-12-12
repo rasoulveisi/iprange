@@ -71,14 +71,21 @@ CURRENT_ENTRIES_UCI=$(uci get firewall."$UCI_ID".entry 2>/dev/null | tr ' ' '\n'
 
 # Get current entries from runtime ipset
 CURRENT_ENTRIES_RUNTIME=""
+RUNTIME_EXISTS=0
 if ipset list "$SET_NAME" >/dev/null 2>&1; then
+    RUNTIME_EXISTS=1
     CURRENT_ENTRIES_RUNTIME=$(ipset list "$SET_NAME" | grep -E '^[0-9]' | awk '{print $1}' | sort | uniq)
+    RUNTIME_COUNT=$(echo "$CURRENT_ENTRIES_RUNTIME" | grep -v '^$' | wc -l)
+    echo "Current entries in runtime ipset: $RUNTIME_COUNT"
+else
+    echo "Runtime ipset does not exist yet."
 fi
+
+UCI_COUNT=$(echo "$CURRENT_ENTRIES_UCI" | grep -v '^$' | wc -l)
+echo "Current entries in UCI config: $UCI_COUNT"
 
 # Merge both lists (union) to get all current entries
 CURRENT_ENTRIES=$(printf "%s\n%s" "$CURRENT_ENTRIES_UCI" "$CURRENT_ENTRIES_RUNTIME" | sort | uniq)
-CURRENT_COUNT=$(echo "$CURRENT_ENTRIES" | grep -v '^$' | wc -l)
-echo "Current entries in config: $CURRENT_COUNT"
 
 # 5. READ NEW ENTRIES FROM DOWNLOADED FILE
 NEW_ENTRIES=""
@@ -135,31 +142,54 @@ uci delete firewall."$UCI_ID".entry 2>/dev/null || true
 
 # Flush runtime ipset (much faster than deleting one by one)
 if ipset list "$SET_NAME" >/dev/null 2>&1; then
+    echo "Flushing runtime ipset..."
     ipset flush "$SET_NAME" 2>/dev/null || true
+else
+    echo "Runtime ipset does not exist, will be populated after firewall restart."
 fi
 
 # Add all new entries to both UCI config and runtime ipset
 if [ "$NEW_COUNT" -gt 0 ]; then
-    echo "Adding $NEW_COUNT entries..."
-    added_count=0
+    echo "Adding $NEW_COUNT entries to UCI config and runtime ipset..."
+    uci_added=0
+    runtime_added=0
+    
     for entry in $NEW_ENTRIES; do
         [ -z "$entry" ] && continue
+        
         # Add to UCI config (persistent)
-        if ! uci add_list firewall."$UCI_ID".entry="$entry" 2>>"$ERROR_LOG"; then
+        if uci add_list firewall."$UCI_ID".entry="$entry" 2>>"$ERROR_LOG"; then
+            uci_added=$((uci_added + 1))
+        else
             echo "Error adding $entry to UCI config" >&2
             error_count=$((error_count + 1))
             continue
         fi
-        # Add to runtime ipset (immediate)
-        if ipset list "$SET_NAME" >/dev/null 2>&1; then
-            if ! ipset add "$SET_NAME" "$entry" 2>>"$ERROR_LOG"; then
-                echo "Warning: Could not add $entry to runtime ipset" >&2
+        
+        # Add to runtime ipset (immediate) - ensure ipset exists first
+        if ! ipset list "$SET_NAME" >/dev/null 2>&1; then
+            # Create ipset if it doesn't exist
+            MAXELEM=$(uci get firewall."$UCI_ID".maxelem 2>/dev/null || echo "2048")
+            if ipset create "$SET_NAME" hash:net family inet maxelem "$MAXELEM" 2>>"$ERROR_LOG"; then
+                echo "Created runtime ipset '$SET_NAME'"
             else
-                added_count=$((added_count + 1))
+                echo "Warning: Could not create runtime ipset, entries will be added after firewall restart" >&2
+                continue
             fi
         fi
+        
+        # Now add to runtime ipset
+        if ipset add "$SET_NAME" "$entry" 2>>"$ERROR_LOG"; then
+            runtime_added=$((runtime_added + 1))
+        else
+            echo "Warning: Could not add $entry to runtime ipset (may already exist)" >&2
+        fi
     done
-    echo "Successfully added $added_count entries to runtime ipset."
+    
+    echo "Successfully added $uci_added entries to UCI config."
+    echo "Successfully added $runtime_added entries to runtime ipset."
+else
+    echo "No new entries to add."
 fi
 
 # 8. CHECK FOR ERRORS AND DISPLAY LOG

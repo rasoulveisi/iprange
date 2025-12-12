@@ -53,8 +53,17 @@ uci commit firewall
 3. **Restart the firewall** to apply changes:
 
 ```bash
+# Reload firewall (faster, applies config changes)
+/etc/init.d/firewall reload
+
+# Or restart firewall (full restart, ensures everything is synced)
 /etc/init.d/firewall restart
 ```
+
+**Reload vs Restart:**
+
+- `reload`: Applies configuration changes without full restart (faster)
+- `restart`: Full service restart (ensures complete synchronization, recommended after major changes)
 
 **Parameters explained:**
 
@@ -69,6 +78,12 @@ Check your IPSet configuration and contents:
 ```bash
 # View UCI configuration
 uci show firewall | grep iran
+
+# View the raw firewall config file
+cat /etc/config/firewall | grep -A 10 iran
+
+# Watch/monitor the firewall config file (real-time)
+watch -n 1 'cat /etc/config/firewall | grep -A 10 iran'
 
 # View runtime IPSet (nftables)
 nft -t list sets table inet fw4
@@ -91,12 +106,26 @@ ipset add iran 185.94.96.12/32
 # Add a single IP or CIDR range
 uci add_list firewall.@ipset[0].entry="185.188.104.0/24"
 
-# Commit and restart
+# Commit and apply changes
 uci commit firewall
-/etc/init.d/firewall restart
+/etc/init.d/firewall reload
+# Or use restart for full reload: /etc/init.d/firewall restart
 ```
 
 **Note:** Replace `@ipset[0]` with the correct index if you have multiple IPSets. Use `uci show firewall | grep ipset` to find the correct index.
+
+**Viewing and monitoring the config:**
+
+```bash
+# View the firewall config file
+cat /etc/config/firewall
+
+# View only IPSet sections
+cat /etc/config/firewall | grep -A 10 ipset
+
+# Watch config file in real-time (if watch is installed)
+watch -n 1 'cat /etc/config/firewall | grep -A 10 ipset'
+```
 
 ### Remove IP Addresses from IPSet
 
@@ -306,11 +335,23 @@ If your IPSet becomes empty:
 # Check UCI configuration
 uci show firewall | grep iran
 
+# View firewall config file directly
+cat /etc/config/firewall | grep -A 10 iran
+
+# Watch config file changes (real-time monitoring)
+watch -n 1 'cat /etc/config/firewall | grep -A 10 iran'
+
 # Check runtime IPSet (after firewall restart)
 ipset list iran
 
 # Check nftables sets
 nft -t list sets table inet fw4
+
+# Reload firewall to apply config changes
+/etc/init.d/firewall reload
+
+# Or restart firewall for full reload
+/etc/init.d/firewall restart
 ```
 
 ### Firewall restart issues
@@ -321,11 +362,23 @@ If the firewall fails to restart:
 # Check firewall status
 /etc/init.d/firewall status
 
+# Reload firewall (applies config without full restart)
+/etc/init.d/firewall reload
+
+# Restart firewall (full restart)
+/etc/init.d/firewall restart
+
 # View firewall logs
 logread | tail -50
 
-# Test firewall configuration
-/etc/init.d/firewall reload
+# Watch firewall logs in real-time
+logread -f | grep firewall
+
+# View current firewall config
+cat /etc/config/firewall
+
+# Watch firewall config changes (if watch command is available)
+watch -n 1 'cat /etc/config/firewall | grep -A 5 ipset'
 ```
 
 ### Network connectivity issues
