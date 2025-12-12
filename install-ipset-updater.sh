@@ -138,24 +138,21 @@ echo "Applying changes..."
 : > "$ERROR_LOG"
 error_count=0
 
-# Remove old entries from both UCI config and runtime ipset
-if [ "$REMOVE_COUNT" -gt 0 ]; then
-    echo "Removing $REMOVE_COUNT entries..."
-    for entry in $TO_REMOVE; do
-        [ -z "$entry" ] && continue
-        # Remove from UCI config
-        uci del_list firewall."$UCI_ID".entry="$entry" 2>>"$ERROR_LOG" || error_count=$((error_count + 1))
-        # Remove from runtime ipset
-        if ipset list "$SET_NAME" >/dev/null 2>&1; then
-            ipset del "$SET_NAME" "$entry" 2>>"$ERROR_LOG" || true
-        fi
-    done
+# OPTIMIZATION: Clear all entries at once (much faster than one-by-one)
+echo "Clearing existing entries..."
+# Clear all entries from UCI config at once
+uci delete firewall."$UCI_ID".entry 2>/dev/null || true
+
+# Flush runtime ipset (much faster than deleting one by one)
+if ipset list "$SET_NAME" >/dev/null 2>&1; then
+    ipset flush "$SET_NAME" 2>/dev/null || true
 fi
 
-# Add new entries to both UCI config and runtime ipset
-if [ "$ADD_COUNT" -gt 0 ]; then
-    echo "Adding $ADD_COUNT entries..."
-    for entry in $TO_ADD; do
+# Add all new entries to both UCI config and runtime ipset
+if [ "$NEW_COUNT" -gt 0 ]; then
+    echo "Adding $NEW_COUNT entries..."
+    added_count=0
+    for entry in $NEW_ENTRIES; do
         [ -z "$entry" ] && continue
         # Add to UCI config (persistent)
         if ! uci add_list firewall."$UCI_ID".entry="$entry" 2>>"$ERROR_LOG"; then
@@ -166,10 +163,13 @@ if [ "$ADD_COUNT" -gt 0 ]; then
         # Add to runtime ipset (immediate)
         if ipset list "$SET_NAME" >/dev/null 2>&1; then
             if ! ipset add "$SET_NAME" "$entry" 2>>"$ERROR_LOG"; then
-                echo "Warning: Could not add $entry to runtime ipset (may already exist)" >&2
+                echo "Warning: Could not add $entry to runtime ipset" >&2
+            else
+                added_count=$((added_count + 1))
             fi
         fi
     done
+    echo "Successfully added $added_count entries to runtime ipset."
 fi
 
 # 8. CHECK FOR ERRORS AND DISPLAY LOG
