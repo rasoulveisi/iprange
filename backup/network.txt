@@ -1,0 +1,44 @@
+root@OpenWrt:~# cat /etc/config/network
+
+config interface 'loopback'
+        option device 'lo'
+        option proto 'static'
+        option ipaddr '127.0.0.1'
+        option netmask '255.0.0.0'
+
+config globals 'globals'
+        option packet_steering '1'
+
+config device
+        option name 'br-lan'
+        option type 'bridge'
+        list ports 'lan2'
+        list ports 'lan3'
+
+config interface 'lan'
+        option device 'br-lan'
+        option proto 'static'
+        option ipaddr '192.168.20.1'
+        option netmask '255.255.255.0'
+        option ip6assign '60'
+
+config interface 'wan'
+        option device 'wan'
+        option proto 'dhcp'
+        option metric '10'
+
+config interface 'wan1'
+        option proto 'dhcp'
+        option device 'lan1'
+        option ipv6 '0'
+        option metric '20'
+        option delegate '0'
+
+config interface 'wan6'
+        option device 'wan'
+        option proto 'dhcpv6'
+        option req_prefix 'auto'
+        option reqaddress 'try'
+        option reqprefix 'auto'
+        option norelease '1'
+        option metric '10'

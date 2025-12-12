@@ -1,0 +1,22 @@
+# Temporary files
+*.tmp
+*.log
+/tmp/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# OpenWrt specific
+*.ipk
+*.opkg
+*.backup
