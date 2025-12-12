@@ -201,7 +201,7 @@ uci add firewall ipset
 # Configure the ipset (replace @ipset[-1] with the actual index if needed)
 uci set firewall.@ipset[-1].name='iran'
 uci set firewall.@ipset[-1].family='ipv4'
-uci set firewall.@ipset[-1].match='src_net'
+uci set firewall.@ipset[-1].match='dst_net'
 
 # Commit the changes
 uci commit firewall
