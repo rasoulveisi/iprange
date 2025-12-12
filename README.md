@@ -156,10 +156,14 @@ uci commit firewall
 
 An automated script to update IPSet entries from a GitHub-hosted IP list.
 
+**Repository:** [https://github.com/ownopenwrt/openwrt](https://github.com/ownopenwrt/openwrt)
+
 ### Features
 
 - ✅ Downloads IP ranges from a GitHub repository
+- ✅ **Updates both firewall config (UCI) AND runtime ipset** - fixes the issue where IPs were only added to config
 - ✅ **Safely updates** OpenWrt IPSet configuration (only removes/adds changed entries)
+- ✅ Automatically creates runtime ipset if it doesn't exist
 - ✅ Automatically restarts firewall to apply changes
 - ✅ Error handling and logging
 - ✅ **PBR-friendly**: Preserves existing configuration if download fails
@@ -173,7 +177,7 @@ An automated script to update IPSet entries from a GitHub-hosted IP list.
 2. Download and run the installation script:
 
 ```bash
-wget -O - https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install-ipset-updater.sh | sh
+wget -O - https://raw.githubusercontent.com/ownopenwrt/openwrt/main/install-ipset-updater.sh | sh
 ```
 
 This will install the `ipset-update` command on your system.
@@ -183,7 +187,7 @@ This will install the `ipset-update` command on your system.
 Run the updater directly without installation:
 
 ```bash
-wget -O - https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ipset-update.sh | sh
+wget -O - https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh | sh
 ```
 
 ### Prerequisites
@@ -215,17 +219,34 @@ ipset-update
 #### If running directly:
 
 ```bash
-wget -O - https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ipset-update.sh | sh
+wget -O - https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh | sh
 ```
 
 ### Configuration Options
 
-Edit the script to customize:
+The script is pre-configured to use:
+
+- `URL`: `https://raw.githubusercontent.com/ownopenwrt/openwrt/main/list.txt`
+- `SET_NAME`: `iran` (default)
+
+To customize, edit the script variables:
 
 - `URL`: The GitHub raw URL of your IP list
 - `SET_NAME`: The name of your IPSet (default: 'iran')
 - `TEMP_FILE`: Temporary file location (default: '/tmp/ip_list.txt')
 - `ERROR_LOG`: Error log location (default: '/tmp/script_errors.log')
+
+### How It Works
+
+The script addresses a common issue where IPs added through UCI only update the firewall configuration but not the runtime ipset. This script:
+
+1. **Downloads** the IP list from GitHub
+2. **Compares** current entries in both UCI config and runtime ipset
+3. **Adds new IPs** to both:
+   - UCI firewall configuration (for persistence across reboots)
+   - Runtime ipset (for immediate use without waiting for firewall restart)
+4. **Removes old IPs** from both UCI config and runtime ipset
+5. **Restarts firewall** to ensure everything is synchronized
 
 ### IP List Format
 
@@ -261,9 +282,12 @@ uci show firewall | grep ipset
 
 **Solution:**
 
-1. Restart the firewall: `/etc/init.d/firewall restart`
-2. Verify the IPSet name matches exactly (case-sensitive)
-3. Check firewall logs: `logread | grep firewall`
+1. The script now automatically creates the runtime ipset if it doesn't exist
+2. If issues persist, restart the firewall: `/etc/init.d/firewall restart`
+3. Verify the IPSet name matches exactly (case-sensitive)
+4. Check firewall logs: `logread | grep firewall`
+
+**Note:** This script fixes the issue where IPs were only added to firewall config. It now updates both the config and runtime ipset simultaneously.
 
 ### PBR (Policy-Based Routing) not working
 
