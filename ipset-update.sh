@@ -31,7 +31,6 @@ fetch_url() {
 
 fetch_geoip() {
     local country="$1"
-    echo "Fetching GeoIP data for $country..."
     fetch_url "https://www.ipdeny.com/ipblocks/data/aggregated/${country}-aggregated.zone" 2>/dev/null
 }
 
@@ -51,7 +50,7 @@ fi
 
 # Add Iran GeoIP data if enabled
 if [ "$INCLUDE_IRAN_GEOIP" = "true" ]; then
-    echo "Adding Iran GeoIP data..."
+    echo "Fetching Iran GeoIP data..."
     fetch_geoip "ir" >> "$TEMP_FILE"
 fi
 
@@ -165,68 +164,6 @@ if [ -s "$ERROR_LOG" ]; then
     cat "$ERROR_LOG" >&2
 fi
 
-cmd_update() {
-    echo "OpenWrt IPSet Updater - Starting Update..."
-    echo "========================================"
-    load_config "$IPSET_NAME"
-
-# Data source functions (based on OpenWrt IPSet extras)
-fetch_file() {
-    local source_url="$1"
-    echo "Downloading from: $source_url"
-    if command -v curl >/dev/null 2>&1; then
-        curl -s --max-time 30 "$source_url" || wget -q -O - --timeout=30 "$source_url" 2>/dev/null
-    else
-        wget -q -O - --timeout=30 "$source_url" 2>/dev/null
-    fi
-}
-
-fetch_asn() {
-    local asn="$1"
-    echo "Fetching ASN $asn data from RIPEstat..."
-    fetch_file "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn" | \
-        jsonfilter -e '@["data"]["prefixes"][*]["prefix"]' 2>/dev/null || \
-        echo "Error: Could not fetch ASN data" >&2
-}
-
-fetch_geoip() {
-    local country="$1"
-    echo "Fetching GeoIP data for $country from IPdeny..."
-    (
-        fetch_file "https://www.ipdeny.com/ipblocks/data/aggregated/${country}-aggregated.zone"
-        fetch_file "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/${country}-aggregated.zone"
-    ) 2>/dev/null || echo "Error: Could not fetch GeoIP data" >&2
-}
-
-resolve_domain() {
-    local domain="$1"
-    echo "Resolving domain: $domain"
-    if command -v resolveip >/dev/null 2>&1; then
-        resolveip "$domain" 2>/dev/null
-    else
-        # Fallback to nslookup if resolveip not available
-        nslookup "$domain" 2>/dev/null | awk '/^Address: / {print $2}' | grep -v ':'
-    fi
-}
-
-# Main command dispatcher
-case "$COMMAND" in
-    setup) cmd_setup ;;
-    unset) cmd_unset ;;
-    update|"") cmd_update ;;
-    install) cmd_install ;;
-    install-hotplug) cmd_install_hotplug ;;
-    *)
-        echo "Usage: $0 {setup|unset|update|install|install-hotplug} [ipset_name]" >&2
-        echo "Commands:" >&2
-        echo "  setup          - Create IPSet configuration and runtime set" >&2
-        echo "  unset          - Remove IPSet configuration and runtime set" >&2
-        echo "  update         - Update IPSet with new data (default)" >&2
-        echo "  install        - Install script locally to /usr/bin/" >&2
-        echo "  install-hotplug- Install hotplug script for automatic updates" >&2
-        exit 1
-        ;;
-esac
 
 # Check required commands
 command -v wget >/dev/null || { echo "Error: wget not found." >&2; exit 1; }
@@ -313,7 +250,7 @@ echo "Using '$SET_NAME' at config section '$UCI_ID'"
 if ! ipset list "$SET_NAME" >/dev/null 2>&1; then
     echo "Runtime IPSet '$SET_NAME' not found. Creating it..."
     # Get maxelem from config
-    MAXELEM=$(uci get firewall."$UCI_ID".maxelem 2>/dev/null || echo "$DEFAULT_MAXELEM")
+    MAXELEM=$(uci get firewall."$UCI_ID".maxelem 2>/dev/null || echo "$MAXELEM")
 
     # Determine family flag
     case "$FAMILY" in
