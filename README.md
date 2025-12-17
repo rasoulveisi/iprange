@@ -1,404 +1,472 @@
-# OpenWrt Configuration Guide
+# OpenWrt Complete Configuration Guide
 
-A comprehensive guide for configuring OpenWrt routers, including network settings, firewall IPSet management, and automated IP list updates.
+A comprehensive guide for configuring OpenWrt routers from scratch, specifically tailored for Dual-WAN setups (WAN + WANB), IPv6 support, MWAN3 Failover/PBR, and automated Firewall IPSet management.
 
 ## Table of Contents
 
-- [Network Configuration](#network-configuration)
-- [Firewall IPSet Management](#firewall-ipset-management)
-- [IPSet Updater Script](#ipset-updater-script)
+- [Part 1: Initial Network Configuration](#part-1-initial-network-configuration)
+  - [Interfaces (IPv4 & IPv6)](#1-interfaces-etcconfignetwork)
+  - [DHCP & DNS](#2-dhcp--dns-etcconfigdhcp)
+  - [Firewall Zones](#3-firewall-zones-etcconfigfirewall)
+  - [Applying Changes & No-IPv4 Fix](#4-applying-changes--the-no-ipv4-fix)
+- [Part 2: Firewall IPSet Management](#part-2-firewall-ipset-management)
+- [Part 3: Multi-WAN & Routing Logic (MWAN3)](#part-3-multi-wan--routing-logic-mwan3)
+- [Part 4: IPSet Updater Script](#part-4-ipset-updater-script)
 - [Troubleshooting](#troubleshooting)
 
 ---
 
-## Network Configuration
+## Part 1: Initial Network Configuration
 
-### Router and Modem IP Settings
+This section covers setting up the router from a fresh state to handle a Dual-WAN environment:
 
-Configure your router and modem with the following IP addresses:
+- **Router LAN IP:** `192.168.20.1`
+- **WAN (Primary):** Supports IPv4 & IPv6.
+- **WANB (Backup/Modem):** IPv4 only (IPv6 disabled).
 
-- **Router IP**: `192.168.20.1`
-- **Modem IP**: `192.168.10.1`
+### 1. Interfaces (`/etc/config/network`)
 
-These settings ensure proper network segmentation and routing.
+Edit the network configuration to define your loopback, bridge, and WAN interfaces.
+
+```bash
+vi /etc/config/network
+```
+
+**Configuration Content:**
+
+```lua
+config interface 'loopback'
+        option device 'lo'
+        option proto 'static'
+        option ipaddr '127.0.0.1'
+        option netmask '255.0.0.0'
+
+config globals 'globals'
+        option ula_prefix 'fda1:66d8:dae0::/48'
+        option packet_steering '1'
+
+config device
+        option name 'br-lan'
+        option type 'bridge'
+        list ports 'lan2'
+        list ports 'lan3'
+
+config interface 'lan'
+        option device 'br-lan'
+        option proto 'static'
+        option ipaddr '192.168.20.1'
+        option netmask '255.255.255.0'
+        option ip6assign '60'
+
+# Primary WAN: Handles IPv4
+config interface 'wan'
+        option device 'wan'
+        option proto 'dhcp'
+        option metric '10'
+
+# Primary WAN: Handles IPv6
+config interface 'wan6'
+        option device 'wan'
+        option proto 'dhcpv6'
+        option reqaddress 'try'
+        option reqprefix 'auto'
+        option norelease '1'
+        option metric '10'
+
+# Backup WAN (Modem): IPv4 Only - Renamed to wanb
+config interface 'wanb'
+        option proto 'dhcp'
+        option device 'lan1'
+        option metric '20'
+        option delegate '0' # Disables IPv6 delegation for this interface
+```
+
+### 2. DHCP & DNS (`/etc/config/dhcp`)
+
+Configure `dnsmasq` to hand out IP addresses to your LAN clients.
+
+```bash
+vi /etc/config/dhcp
+```
+
+**Configuration Content:**
+
+```lua
+config dnsmasq
+        option domainneeded '1'
+        option boguspriv '1'
+        option filterwin2k '0'
+        option localise_queries '1'
+        option rebind_protection '1'
+        option rebind_localhost '1'
+        option local '/lan/'
+        option domain 'lan'
+        option expandhosts '1'
+        option nonegcache '0'
+        option authoritative '1'
+        option readethers '1'
+        option leasefile '/tmp/dhcp.leases'
+        option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
+        option localservice '1'
+
+config dhcp 'lan'
+        option interface 'lan'
+        option start '100'
+        option limit '150'
+        option leasetime '12h'
+        option dhcpv4 'server'
+        option dhcpv6 'server'
+        option ra 'server'
+        list ra_flags 'managed-config'
+        list ra_flags 'other-config'
+
+config dhcp 'wan'
+        option interface 'wan'
+        option ignore '1'
+
+config odhcpd 'odhcpd'
+        option maindhcp '0'
+        option leasefile '/tmp/hosts/odhcpd'
+        option leasetrigger '/usr/sbin/odhcpd-update'
+        option loglevel '4'
+```
+
+### 3. Firewall Zones (`/etc/config/firewall`)
+
+We must add `wanb` to the `wan` zone so traffic can flow out to the internet, and ensure LAN input is accepted.
+
+```bash
+vi /etc/config/firewall
+```
+
+**Configuration Snippet:**
+
+```lua
+config zone
+        option name 'lan'
+        list network 'lan'
+        option input 'ACCEPT'    # CRITICAL for DHCP
+        option output 'ACCEPT'
+        option forward 'ACCEPT'
+
+config zone
+        option name 'wan'
+        list network 'wan'
+        list network 'wan6'
+        list network 'wanb'      # Added wanb here
+        option input 'REJECT'
+        option output 'ACCEPT'
+        option forward 'REJECT'
+        option masq '1'
+        option mtu_fix '1'
+```
+
+### 4. Applying Changes & The "No IPv4" Fix
+
+**Issue:** Clients get IPv6 but no IPv4 (APIPA 169.254.x.x).
+**Fix:** Restart DNSMasq _after_ the network is up.
+
+1.  Restart Network: `service network restart`
+2.  **Restart DNS:** `service dnsmasq restart`
+3.  **Client:** `ipconfig /renew`
 
 ---
 
-## Firewall IPSet Management
+## Part 2: Firewall IPSet Management
 
-IPSet is a framework inside the Linux kernel that allows you to manage IP addresses, networks, ports, MAC addresses, and other sets. In OpenWrt, IPSets are managed through the UCI (Unified Configuration Interface) and can be used for firewall rules and policy-based routing.
+You must create the `iran` IPSet before configuring MWAN3 rules, or MWAN3 will fail to load the rule.
 
-> **Important Note:** When you add an IPSet through the OpenWrt web UI (LuCI), it gets added to the firewall configuration, but it won't appear in the `ipset list` command until the firewall is restarted and the IPSet is properly initialized.
+1.  **Create runtime set:**
 
-### Create an IPSet
+    ```bash
+    ipset create iran hash:net family inet maxelem 2048
+    ```
 
-To create a new IPSet, you need to:
+2.  **Add to persistent config:**
 
-1. **Create the runtime IPSet** (temporary, until firewall restart):
+    ```bash
+    uci add firewall ipset
+    uci set firewall.@ipset[-1].name='iran'
+    uci set firewall.@ipset[-1].family='ipv4'
+    uci set firewall.@ipset[-1].match='dst_net'
+    uci commit firewall
+    ```
 
-```bash
-ipset create iran hash:net family inet maxelem 2048
-```
+3.  **Apply:**
+    ```bash
+    /etc/init.d/firewall reload
+    ```
 
-2. **Add IPSet to UCI configuration** (persistent):
+---
 
-```bash
-uci add firewall ipset
-uci set firewall.@ipset[-1].name='iran'
-uci set firewall.@ipset[-1].family='ipv4'
-uci set firewall.@ipset[-1].match='dst_net'
-uci commit firewall
-```
+## Part 3: Multi-WAN & Routing Logic (MWAN3)
 
-3. **Restart the firewall** to apply changes:
+This configuration achieves three goals:
 
-```bash
-# Reload firewall (faster, applies config changes)
-/etc/init.d/firewall reload
+1.  **Failover:** Primary traffic uses `wan`. If `wan` fails, it switches to `wanb`.
+2.  **Policy Routing:** Traffic to `iran` IPs **always** uses `wanb`.
+3.  **Smooth Switching:** Uses sticky sessions to keep video calls stable during minor link jitters.
 
-# Or restart firewall (full restart, ensures everything is synced)
-/etc/init.d/firewall restart
-```
-
-**Reload vs Restart:**
-
-- `reload`: Applies configuration changes without full restart (faster)
-- `restart`: Full service restart (ensures complete synchronization, recommended after major changes)
-
-**Parameters explained:**
-
-- `name`: The name of your IPSet
-- `family`: `ipv4` for IPv4 addresses, `ipv6` for IPv6
-- `match`: `dst_net` for destination matching, `src_net` for source matching
-
-### View IPSet Contents
-
-Check your IPSet configuration and contents:
+### 1. Install MWAN3
 
 ```bash
-# View UCI configuration
-uci show firewall | grep iran
-
-# View the raw firewall config file
-cat /etc/config/firewall | grep -A 10 iran
-
-# Watch/monitor the firewall config file (real-time)
-watch -n 1 'cat /etc/config/firewall | grep -A 10 iran'
-
-# View runtime IPSet (nftables)
-nft -t list sets table inet fw4
-
-# View runtime IPSet (legacy ipset command)
-ipset list iran
+opkg update
+opkg install mwan3 luci-app-mwan3
 ```
 
-### Add IP Addresses to IPSet
+### 2. Configure MWAN3 (`/etc/config/mwan3`)
 
-#### Method 1: Add to runtime IPSet (temporary)
+**Note on smoothness:** We set `timeout` to 2 and `interval` to 3. This detects a failure within ~6-10 seconds. We use `sticky '1'` so if the WAN connection bounces momentarily, active calls attempt to hold onto their current interface rather than snapping back immediately.
 
 ```bash
-ipset add iran 185.94.96.12/32
+echo > /etc/config/mwan3
+vi /etc/config/mwan3
 ```
 
-#### Method 2: Add to UCI configuration (persistent)
+**Configuration Content:**
 
-```bash
-# Add a single IP or CIDR range
-uci add_list firewall.@ipset[0].entry="185.188.104.0/24"
+```lua
+config globals 'globals'
+        option mmx_mask '0x3F00'
 
-# Commit and apply changes
-uci commit firewall
-/etc/init.d/firewall reload
-# Or use restart for full reload: /etc/init.d/firewall restart
-```
+# --- 1. Interfaces & Health Checks ---
 
-**Note:** Replace `@ipset[0]` with the correct index if you have multiple IPSets. Use `uci show firewall | grep ipset` to find the correct index.
-
-**Viewing and monitoring the config:**
-
-```bash
-# View the firewall config file
-cat /etc/config/firewall
-
-# View only IPSet sections
-cat /etc/config/firewall | grep -A 10 ipset
-
-# Watch config file in real-time (if watch is installed)
-watch -n 1 'cat /etc/config/firewall | grep -A 10 ipset'
-```
-
-### Remove IP Addresses from IPSet
-
-To remove a specific IP entry from the UCI configuration:
-
-```bash
-# Find the entry ID first
-uci show firewall | grep -A 5 iran
-
-# Delete the specific entry (replace $UCI_ID with actual ID)
-uci delete firewall."$UCI_ID".entry 2>/dev/null
-uci commit firewall
-/etc/init.d/firewall restart
-```
-
-### Delete an IPSet Completely
-
-To completely remove an IPSet:
-
-1. **Destroy the runtime IPSet:**
-
-```bash
-ipset destroy iran
-```
-
-2. **Remove from nftables:**
-
-```bash
-nft delete set inet fw4 iran
-```
-
-3. **Remove from UCI configuration:**
-
-```bash
-# Edit the firewall config
-nano /etc/config/firewall
-```
-
-Delete the entire IPSet block:
-
-```
-config ipset
-        option name 'iran'
+config interface 'wan'
+        option enabled '1'
+        list track_ip '1.1.1.1'
+        list track_ip '8.8.8.8'
+        option reliability '1'
+        option count '1'
+        option timeout '2'
+        option interval '3'
+        option down '3'
+        option up '3'
         option family 'ipv4'
+
+config interface 'wanb'
+        option enabled '1'
+        list track_ip '208.67.222.222'
+        list track_ip '8.8.4.4'
+        option reliability '1'
+        option count '1'
+        option timeout '2'
+        option interval '3'
+        option down '3'
+        option up '3'
+        option family 'ipv4'
+
+config interface 'wan6'
+        option enabled '1'
+        list track_ip '2001:4860:4860::8888'
+        list track_ip '2606:4700:4700::1111'
+        option reliability '1'
+        option count '1'
+        option timeout '2'
+        option interval '3'
+        option down '3'
+        option up '3'
+        option family 'ipv6'
+
+# --- 2. Members (Weights & Metrics) ---
+# Metric: Lower number = Higher Priority
+
+config member 'wan_m1'
+        option interface 'wan'
+        option metric '1'
+        option weight '3'
+
+config member 'wanb_m1'
+        option interface 'wanb'
+        option metric '1'
+        option weight '3'
+
+config member 'wanb_m2'
+        option interface 'wanb'
+        option metric '2' # Backup priority
+        option weight '3'
+
+config member 'wan6_m1'
+        option interface 'wan6'
+        option metric '1'
+        option weight '3'
+
+# --- 3. Policies (Routing Logic) ---
+
+# Policy: Iran Only (Force WANB)
+config policy 'iran_wanb_force'
+        list use_member 'wanb_m1'
+        option last_resort 'unreachable'
+
+# Policy: IPv4 Failover (WAN Primary -> WANB Backup)
+config policy 'wan_failover_v4'
+        list use_member 'wan_m1'
+        list use_member 'wanb_m2'
+        option last_resort 'unreachable'
+
+# Policy: IPv6 (WAN6 Only - WANB has no v6)
+config policy 'wan_v6_only'
+        list use_member 'wan6_m1'
+        option last_resort 'unreachable'
+
+# --- 4. Rules (Applying Logic) ---
+# Rules are processed top to bottom.
+
+# Rule 1: Route 'iran' IPSet to WANB
+config rule 'rule_iran'
+        option proto 'all'
+        option sticky '1'
+        option ipset 'iran'
+        option use_policy 'iran_wanb_force'
+        option family 'ipv4'
+
+# Rule 2: HTTPS Sticky (Helps video calls stay stable)
+config rule 'https_sticky'
+        option dest_port '443'
+        option proto 'tcp'
+        option sticky '1'
+        option use_policy 'wan_failover_v4'
+        option family 'ipv4'
+
+# Rule 3: Default IPv4 (WAN -> Failover to WANB)
+config rule 'default_v4'
+        option dest_ip '0.0.0.0/0'
+        option proto 'all'
+        option sticky '1'
+        option use_policy 'wan_failover_v4'
+        option family 'ipv4'
+
+# Rule 4: Default IPv6 (WAN6 Only)
+config rule 'default_v6'
+        option dest_ip '::/0'
+        option proto 'all'
+        option sticky '0'
+        option use_policy 'wan_v6_only'
+        option family 'ipv6'
 ```
 
-4. **Commit and restart:**
+### 3. Restart and Verify
 
 ```bash
-uci commit firewall
-/etc/init.d/firewall restart
+service mwan3 restart
+mwan3 status
 ```
 
 ---
 
-## IPSet Updater Script
+## Part 4: IPSet Updater Script
 
-An automated script to update IPSet entries from a GitHub-hosted IP list.
+A clean, simple IPSet management script with GeoIP support.
 
-**Repository:** [https://github.com/ownopenwrt/openwrt](https://github.com/ownopenwrt/openwrt)
+### Repository
+
+[https://github.com/ownopenwrt/openwrt](https://github.com/ownopenwrt/openwrt)
 
 ### Features
 
-- ✅ Downloads IP ranges from a GitHub repository
-- ✅ **Updates both firewall config (UCI) AND runtime ipset** - fixes the issue where IPs were only added to config
-- ✅ **Safely updates** OpenWrt IPSet configuration (only removes/adds changed entries)
-- ✅ Automatically creates runtime ipset if it doesn't exist
-- ✅ Automatically restarts firewall to apply changes
-- ✅ Error handling and logging
-- ✅ **PBR-friendly**: Preserves existing configuration if download fails
-- ✅ Cleanup on exit
+- **Simple & Clean**: Single-purpose script for IPSet management
+- **Iran GeoIP**: Automatically includes Iran IP ranges from GeoIP data
+- **Cache-Busting**: Timestamp parameters prevent stale downloads
+- **IPv4/IPv6 Support**: Configurable IP family filtering
+- **Automatic Setup**: Creates UCI configuration automatically
 
-### Installation
+### Installation & Usage
 
-#### Method 1: Install locally on OpenWrt
+#### Quick Start (Iran IP ranges only)
 
-1. SSH into your OpenWrt router
-2. Download and run the installation script:
+**One-line run (No installation required):**
 
 ```bash
-wget -O - https://raw.githubusercontent.com/ownopenwrt/openwrt/main/install-ipset-updater.sh | sh
+wget -O - "https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh?t=$(date +%s)" | sh
 ```
 
-This will install the `ipset-update` command on your system.
+#### What It Does
 
-#### Method 2: Run directly from GitHub
+The script automatically:
 
-Run the updater directly without installation:
+1. Downloads your IP list from `list.txt`
+2. Adds Iran GeoIP data from IPdeny.com
+3. Creates/updates the "iran" IPSet
+4. Configures firewall rules
+
+**Just run:**
 
 ```bash
-wget -O - https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh | sh
+wget -O - "https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh?t=$(date +%s)" | sh
 ```
 
-### Prerequisites
+#### Scheduled Updates
 
-Before running the script, you need to create the IPSet in OpenWrt:
+**Add to cron for daily updates:**
 
 ```bash
-# Add a new ipset
-uci add firewall ipset
+# Edit crontab
+crontab -e
 
-# Configure the ipset (replace @ipset[-1] with the actual index if needed)
-uci set firewall.@ipset[-1].name='iran'
-uci set firewall.@ipset[-1].family='ipv4'
-uci set firewall.@ipset[-1].match='dst_net'
-
-# Commit the changes
-uci commit firewall
-/etc/init.d/firewall restart
+# Add this line for daily updates at 3 AM:
+0 3 * * * wget -qO - "https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh?t=$(date +%s)" | sh >> /tmp/ipset-update.log 2>&1
 ```
 
-### Usage
+#### Configuration Options
 
-#### If installed locally:
+Edit the top of `ipset-update.sh` to customize:
 
 ```bash
-ipset-update
+# IPSet configuration
+URL="https://raw.githubusercontent.com/ownopenwrt/openwrt/main/list.txt"  # Your IP list
+SET_NAME="iran"          # IPSet name
+MAXELEM="2048"          # Maximum entries
+FAMILY="ipv4"           # ipv4 or ipv6
+
+# Iran GeoIP (automatically includes Iran IP ranges)
+INCLUDE_IRAN_GEOIP="true"  # Set to "false" to disable
 ```
 
-#### If running directly:
+#### Troubleshooting
+
+**Check IPSet status:**
 
 ```bash
-wget -O - https://raw.githubusercontent.com/ownopenwrt/openwrt/main/ipset-update.sh | sh
+ipset list iran | head -10
 ```
 
-### Configuration Options
+**Check firewall config:**
 
-The script is pre-configured to use:
-
-- `URL`: `https://raw.githubusercontent.com/ownopenwrt/openwrt/main/list.txt`
-- `SET_NAME`: `iran` (default)
-
-To customize, edit the script variables:
-
-- `URL`: The GitHub raw URL of your IP list
-- `SET_NAME`: The name of your IPSet (default: 'iran')
-- `TEMP_FILE`: Temporary file location (default: '/tmp/ip_list.txt')
-- `ERROR_LOG`: Error log location (default: '/tmp/script_errors.log')
-
-### How It Works
-
-The script addresses a common issue where IPs added through UCI only update the firewall configuration but not the runtime ipset. This script:
-
-1. **Downloads** the IP list from GitHub
-2. **Compares** current entries in both UCI config and runtime ipset
-3. **Adds new IPs** to both:
-   - UCI firewall configuration (for persistence across reboots)
-   - Runtime ipset (for immediate use without waiting for firewall restart)
-4. **Removes old IPs** from both UCI config and runtime ipset
-5. **Restarts firewall** to ensure everything is synchronized
-
-### IP List Format
-
-The IP list should contain one IP range per line in CIDR notation:
-
-```
-89.235.96.0/22
-89.198.0.0/17
-213.195.52.0/22
-# Comments are ignored
-31.214.172.0/22
+```bash
+uci show firewall | grep iran
 ```
 
-Empty lines and lines starting with `#` are ignored.
+**Manual verification:**
+
+```bash
+# Count entries in IPSet
+ipset list iran | grep -E '^[0-9]' | wc -l
+
+# Test Iran GeoIP data
+curl -s "https://www.ipdeny.com/ipblocks/data/aggregated/ir-aggregated.zone" | head -5
+```
 
 ---
 
 ## Troubleshooting
 
-### IPSet not found error
+### Video Calls Drop completely on switch
 
-**Error:** "IPSet named 'iran' not found in config"
+If the ISP IP changes, the socket _must_ break. However, if using UDP (Zoom/WhatsApp), they usually reconnect fast.
 
-**Solution:** Make sure you've created the IPSet as described in the [Create an IPSet](#create-an-ipset) section. Verify with:
+- **Check:** Ensure `option sticky '1'` is enabled in the rules. This ensures that if the new link (wanb) is used, the call stays there and doesn't try to jump back to `wan` immediately if `wan` flickers up for 1 second.
 
-```bash
-uci show firewall | grep ipset
-```
+### "Iran" traffic going through WAN
 
-### IPSet not appearing in `ipset list`
+1.  Check if IPSet exists: `ipset list iran`.
+2.  Check if MWAN3 rule is active: `mwan3 status`. Look for `rule_iran`.
+3.  Ensure the IPSet was created _before_ restarting MWAN3.
 
-**Problem:** IPSet exists in UCI config but doesn't show in `ipset list`
+### Clients have IPv6 but no IPv4
 
-**Solution:**
+1.  Log into router.
+2.  Run: `service dnsmasq restart`.
+3.  Client: `ipconfig /renew`.
 
-1. The script now automatically creates the runtime ipset if it doesn't exist
-2. If issues persist, restart the firewall: `/etc/init.d/firewall restart`
-3. Verify the IPSet name matches exactly (case-sensitive)
-4. Check firewall logs: `logread | grep firewall`
-
-**Note:** This script fixes the issue where IPs were only added to firewall config. It now updates both the config and runtime ipset simultaneously.
-
-### PBR (Policy-Based Routing) not working
-
-This script is designed to be **PBR-safe**. It will only remove IP ranges that are no longer in your GitHub list and add new ones.
-
-If your IPSet becomes empty:
-
-1. Check if your GitHub repository is accessible
-2. Verify the IP list format (one CIDR range per line)
-3. Check the error log at `/tmp/script_errors.log`
-4. If download fails, existing entries remain intact
-
-### Checking current IPSet status
-
-```bash
-# Check UCI configuration
-uci show firewall | grep iran
-
-# View firewall config file directly
-cat /etc/config/firewall | grep -A 10 iran
-
-# Watch config file changes (real-time monitoring)
-watch -n 1 'cat /etc/config/firewall | grep -A 10 iran'
-
-# Check runtime IPSet (after firewall restart)
-ipset list iran
-
-# Check nftables sets
-nft -t list sets table inet fw4
-
-# Reload firewall to apply config changes
-/etc/init.d/firewall reload
-
-# Or restart firewall for full reload
-/etc/init.d/firewall restart
-```
-
-### Firewall restart issues
-
-If the firewall fails to restart:
-
-```bash
-# Check firewall status
-/etc/init.d/firewall status
-
-# Reload firewall (applies config without full restart)
-/etc/init.d/firewall reload
-
-# Restart firewall (full restart)
-/etc/init.d/firewall restart
-
-# View firewall logs
-logread | tail -50
-
-# Watch firewall logs in real-time
-logread -f | grep firewall
-
-# View current firewall config
-cat /etc/config/firewall
-
-# Watch firewall config changes (if watch command is available)
-watch -n 1 'cat /etc/config/firewall | grep -A 5 ipset'
-```
-
-### Network connectivity issues
-
-If you're unable to download the IP list:
-
-```bash
-# Test connectivity
-ping -c 3 raw.githubusercontent.com
-
-# Test DNS resolution
-nslookup raw.githubusercontent.com
-
-# Check wget/curl availability
-which wget
-which curl
-```
-
----
-
-## License
+### License
 
 MIT License - feel free to modify and distribute.
